@@ -1794,6 +1794,7 @@ namespace plume {
 
         // Present.
         bool presentWait = false;
+        bool presentWait2 = false;
         bool displayTiming = false;
 
         // Framebuffers.

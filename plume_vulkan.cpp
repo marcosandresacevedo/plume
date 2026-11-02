@@ -66,6 +66,7 @@ namespace plume {
         // Tells the system Vulkan loader to enumerate portability drivers, if supported.
         VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
 #   endif
+        VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME,
     };
     
     static const std::unordered_set<std::string> RequiredDeviceExtensions = {
@@ -86,6 +87,8 @@ namespace plume {
         VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME,
         VK_KHR_PRESENT_ID_EXTENSION_NAME,
         VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
+        VK_KHR_PRESENT_ID_2_EXTENSION_NAME,
+        VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME,
         VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME,
         // Vulkan spec requires this to be enabled if supported by the driver.
         VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
@@ -2168,6 +2171,26 @@ namespace plume {
         VkSurfaceCapabilitiesKHR surfaceCapabilities = {};
         vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCapabilities);
 
+        VkSurfaceCapabilitiesPresentWait2KHR presentWait2Caps = {};
+        presentWait2Caps.sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR;
+        VkSurfaceCapabilitiesPresentId2KHR presentId2Caps = {};
+        presentId2Caps.sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_ID_2_KHR;
+        presentWait2Caps.pNext = &presentId2Caps;
+
+        VkPhysicalDeviceSurfaceInfo2KHR surfaceInfo2 = {};
+        surfaceInfo2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR;
+        surfaceInfo2.surface = surface;
+
+        VkSurfaceCapabilities2KHR surfaceCapabilities2 = {};
+        surfaceCapabilities2.sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR;
+        surfaceCapabilities2.pNext = &presentWait2Caps;
+
+        if (vkGetPhysicalDeviceSurfaceCapabilities2KHR(physicalDevice, &surfaceInfo2, &surfaceCapabilities2) == VK_SUCCESS) {
+            presentWait2 = commandQueue->device->capabilities.presentWait2 &&
+                           presentWait2Caps.presentWait2Supported &&
+                           presentId2Caps.presentId2Supported;
+        }
+
         // Pick an alpha compositing mode
         if (surfaceCapabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
             pickedAlphaFlag = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -2276,14 +2299,23 @@ namespace plume {
         presentInfo.waitSemaphoreCount = uint32_t(waitSemaphoresVector.size());
 
         VkPresentIdKHR presentId = {};
+        VkPresentId2KHR presentId2 = {};
         if (desc.enablePresentWait) {
             assert(commandQueue->device->capabilities.presentWait && "Present wait must be supported by the RenderDevice.");
 
             currentPresentId++;
-            presentId.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR;
-            presentId.pPresentIds = &currentPresentId;
-            presentId.swapchainCount = 1;
-            presentInfo.pNext = &presentId;
+            if (presentWait2) {
+                presentId2.sType = VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR;
+                presentId2.pPresentIds = &currentPresentId;
+                presentId2.swapchainCount = 1;
+                presentInfo.pNext = &presentId2;
+            }
+            else {
+                presentId.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR;
+                presentId.pPresentIds = &currentPresentId;
+                presentId.swapchainCount = 1;
+                presentInfo.pNext = &presentId;
+            }
         }
         
         VkResult res;
@@ -2311,7 +2343,18 @@ namespace plume {
 
         if (currentPresentId >= desc.maxFrameLatency) {
             constexpr uint64_t waitTimeout = 100000000;
-            vkWaitForPresentKHR(commandQueue->device->vk, vk, currentPresentId - (desc.maxFrameLatency - 1), waitTimeout);
+            const uint64_t targetPresentId = currentPresentId - (desc.maxFrameLatency - 1);
+
+            if (presentWait2) {
+                VkPresentWait2InfoKHR waitInfo = {};
+                waitInfo.sType = VK_STRUCTURE_TYPE_PRESENT_WAIT_2_INFO_KHR;
+                waitInfo.presentId = targetPresentId;
+                waitInfo.timeout = waitTimeout;
+                vkWaitForPresent2KHR(commandQueue->device->vk, vk, &waitInfo);
+            }
+            else {
+                vkWaitForPresentKHR(commandQueue->device->vk, vk, targetPresentId, waitTimeout);
+            }
         }
     }
 
@@ -2345,6 +2388,9 @@ namespace plume {
         createInfo.imageExtent.height = height;
         createInfo.imageArrayLayers = 1;
         createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (presentWait2) {
+            createInfo.flags |= VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR | VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR;
+        }
         createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         createInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
         createInfo.compositeAlpha = pickedAlphaFlag;
@@ -3890,6 +3936,19 @@ namespace plume {
             featuresChain = &presentWaitFeatures;
         }
 
+        VkPhysicalDevicePresentId2FeaturesKHR presentId2Features = {};
+        VkPhysicalDevicePresentWait2FeaturesKHR presentWait2Features = {};
+        const bool presentWait2Found = supportedOptionalExtensions.find(VK_KHR_PRESENT_ID_2_EXTENSION_NAME) != supportedOptionalExtensions.end() && supportedOptionalExtensions.find(VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME) != supportedOptionalExtensions.end();
+        if (presentWait2Found) {
+            presentId2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_2_FEATURES_KHR;
+            presentId2Features.pNext = featuresChain;
+            featuresChain = &presentId2Features;
+
+            presentWait2Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_2_FEATURES_KHR;
+            presentWait2Features.pNext = featuresChain;
+            featuresChain = &presentWait2Features;
+        }
+
         VkPhysicalDeviceRobustness2FeaturesEXT robustnessFeatures = {};
         const bool robustnessFound = supportedOptionalExtensions.find(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME) != supportedOptionalExtensions.end();
         if (robustnessFound) {
@@ -3982,6 +4041,15 @@ namespace plume {
 
             presentWaitFeatures.pNext = createDeviceChain;
             createDeviceChain = &presentWaitFeatures;
+        }
+
+        const bool presentWait2Supported = presentId2Features.presentId2 && presentWait2Features.presentWait2;
+        if (presentWait2Supported) {
+            presentId2Features.pNext = createDeviceChain;
+            createDeviceChain = &presentId2Features;
+
+            presentWait2Features.pNext = createDeviceChain;
+            createDeviceChain = &presentWait2Features;
         }
 
         nullDescriptorSupported = robustnessFeatures.nullDescriptor;
@@ -4161,7 +4229,8 @@ namespace plume {
         capabilities.scalarBlockLayout = scalarBlockLayoutSupported;
         capabilities.bufferDeviceAddress = bufferDeviceAddressSupported;
         capabilities.samplerMirrorClampToEdge = supportedOptionalExtensions.find(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME) != supportedOptionalExtensions.end();
-        capabilities.presentWait = presentWaitSupported;
+        capabilities.presentWait = presentWaitSupported || presentWait2Supported;
+        capabilities.presentWait2 = presentWait2Supported;
         capabilities.displayTiming = supportedOptionalExtensions.find(VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) != supportedOptionalExtensions.end();
         capabilities.maxTextureSize = physicalDeviceProperties.limits.maxImageDimension2D;
         capabilities.preferHDR = memoryHeapSize > (512 * 1024 * 1024);
