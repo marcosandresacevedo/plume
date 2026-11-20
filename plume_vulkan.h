@@ -241,6 +241,7 @@ namespace plume {
         uint64_t currentPresentId = 0;
         bool immediatePresentModeSupported = false;
         bool mailboxPresentModeSupported = false;
+        bool presentWait2 = false;
 
         VulkanSwapChain(VulkanCommandQueue *commandQueue, const RenderSwapChainDesc &desc);
         ~VulkanSwapChain() override;
